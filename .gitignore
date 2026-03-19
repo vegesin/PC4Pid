@@ -1,0 +1,40 @@
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+__pycache__/
+data/
+results/
+test_data/
+inference/
+
+doc/**
+docs/**
+image/**
+images/**
+image_md/
+
+test_*
+test/
+*.pth
+output.log
+*.log
+
+desktop.ini
+.vscode
+old/**
