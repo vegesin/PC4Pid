@@ -30,17 +30,7 @@ DEFAULT_POINT_NUM = 128       # 统一每帧点数
 # ========== 点云解析函数 ==========
 def parse_radar_bin(bin_path: str, install_angle: float = DEFAULT_ANGLE, radar_height: float = DEFAULT_HEIGHT):
     """
-    解析 TI IWR6843 雷达原始 bin 文件，返回点云坐标 (N, 3)。
-
-    参数：
-        bin_path: .bin 文件路径
-        install_angle: 雷达安装俯仰角（度，与竖直方向夹角）
-        radar_height: 雷达安装高度（米）
-
-    返回：
-        np.ndarray, shape (N, 3), 每个点为 [x, y, z]（米）
-        坐标系：X 前（雷达正前方），Y 左，Z 上（世界坐标系）。
-        解析失败返回 None。
+    解析 .bin 文件，返回 (N, 5) 点云数组，包含 [x, y, z, velocity, power]
     """
     try:
         with open(bin_path, 'rb') as f:
@@ -50,29 +40,25 @@ def parse_radar_bin(bin_path: str, install_angle: float = DEFAULT_ANGLE, radar_h
         return None
 
     if len(frame_data) < 12:
-        print("[ERROR] 文件过小，无有效数据")
         return None
-
-    # 检查帧头 0x55AA
     if frame_data[0] != 0x55 or frame_data[1] != 0xAA:
-        print("[ERROR] 帧头不正确，不是有效的雷达数据包")
         return None
 
-    # 读取帧长度（4字节小端）
     frame_length = struct.unpack('<I', frame_data[2:6])[0]
     if len(frame_data) < 6 + frame_length:
-        print(f"[ERROR] 数据不足，需要 {6+frame_length} 字节，实际 {len(frame_data)}")
         return None
 
     pos = 6
-    pos += 2                      # 跳过时间戳（2字节）
-    pos += 1                      # 跳过 num_tlvs
-    pos += 1                      # 跳过 cloud_type
-
-    if pos + 2 > len(frame_data):
-        print("[ERROR] 无法读取目标数量")
+    pos += 2                      # 跳过时间戳
+    pos += 1                      # 跳过 numTLVs
+    tlv_type = frame_data[pos]    # 应该是 0x01（点云）
+    pos += 1
+    if tlv_type != 0x01:
+        print(f"[WARN] TLV type {tlv_type} not point cloud, skip")
         return None
 
+    if pos + 2 > len(frame_data):
+        return None
     target_num = struct.unpack('<H', frame_data[pos:pos+2])[0]
     pos += 2
 
@@ -80,45 +66,50 @@ def parse_radar_bin(bin_path: str, install_angle: float = DEFAULT_ANGLE, radar_h
     for _ in range(target_num):
         if pos + 9 > len(frame_data):
             break
-
-        # 9字节数据结构：距离(2)+reserved(1)+方位角(1)+俯仰角(1)+reserved(4)
-        range_byte1 = frame_data[pos]
-        range_byte2 = frame_data[pos+1]
-        azimuth_byte = frame_data[pos+3]
-        elevation_byte = frame_data[pos+4]
+        idx1 = struct.unpack('<H', frame_data[pos:pos+2])[0]          # 距离索引
+        idx2 = frame_data[pos+2]                                      # 速度索引
+        idx3 = frame_data[pos+3]                                      # 水平角索引
+        idx4 = frame_data[pos+4]                                      # 俯仰角索引
+        pow_abs = struct.unpack('<I', frame_data[pos+5:pos+9])[0]    # 功率（绝对值）
         pos += 9
 
-        # 距离（米），缩放因子 0.05004 为常见配置
-        range_val = (range_byte1 + range_byte2 * 256) * 0.05004
+        # 1. 距离（米）
+        range_val = idx1 * 0.05
 
-        # 方位角（度），编码范围 -90° ~ +90°
-        if azimuth_byte <= 63:
-            azimuth_angle = math.asin(azimuth_byte / 64.0) * 180 / math.pi
+        # 2. 速度（m/s），远离雷达为正，靠近为负
+        vel_idx = idx2 - 32
+        velocity = vel_idx * 0.104167   # 范围约 -3.33 ~ +3.33
+
+        # 3. 水平角（度）
+        if idx3 <= 63:
+            az_deg = math.asin(idx3 / 64.0) * 180 / math.pi
         else:
-            azimuth_angle = math.asin((azimuth_byte - 128) / 64.0) * 180 / math.pi
+            az_deg = math.asin((idx3 - 128) / 64.0) * 180 / math.pi
 
-        # 俯仰角（度），编码范围 -90° ~ +90°
-        if elevation_byte <= 63:
-            elevation_angle = math.asin(elevation_byte / 64.0) * 180 / math.pi
+        # 4. 俯仰角（度）
+        if idx4 <= 63:
+            el_deg = math.asin(idx4 / 64.0) * 180 / math.pi
         else:
-            elevation_angle = math.asin((elevation_byte - 128) / 64.0) * 180 / math.pi
+            el_deg = math.asin((idx4 - 128) / 64.0) * 180 / math.pi
 
-        azimuth_rad = math.radians(azimuth_angle)
-        elevation_rad = math.radians(elevation_angle)
+        az_rad = math.radians(az_deg)
+        el_rad = math.radians(el_deg)
 
         # 球坐标转雷达自身直角坐标（X前，Y左，Z上）
-        x_radar = range_val * math.sin(azimuth_rad) * math.cos(elevation_rad)
-        y_radar = range_val * math.cos(elevation_rad) * math.cos(azimuth_rad)
-        z_radar = range_val * math.sin(elevation_rad)
+        x_radar = range_val * math.sin(az_rad) * math.cos(el_rad)
+        y_radar = range_val * math.cos(el_rad) * math.cos(az_rad)
+        z_radar = range_val * math.sin(el_rad)
 
-        # 根据安装角度和高度转换到世界坐标系
-        # 假设雷达安装在 Z=0 平面，向下俯仰 install_angle 度（与竖直方向夹角）
+        # 世界坐标转换（安装角度与高度）
         vertical_angle_rad = math.radians(-install_angle)
         z_world = z_radar * math.cos(vertical_angle_rad) + y_radar * math.sin(vertical_angle_rad)
         y_world = -z_radar * math.sin(vertical_angle_rad) + y_radar * math.cos(vertical_angle_rad)
         z_world += radar_height
 
-        points.append([x_radar, y_world, z_world])
+        # 功率处理：可保留线性值，或取对数 dB（推荐）
+        power_db = 10 * math.log10(pow_abs + 1e-6) if pow_abs > 0 else -100
+
+        points.append([x_radar, y_world, z_world, velocity, power_db])
 
     return np.array(points, dtype=np.float32) if points else None
     
@@ -155,6 +146,8 @@ class RadarBinSequenceDataset(Dataset):
                  radar_height=DEFAULT_HEIGHT,
                  load_config=True,
                  transform=None,
+                 mean=None, 
+                 std=None,
                  phase='train'):
         self.target_frame_num = target_frame_num
         self.target_point_num = target_point_num
@@ -162,6 +155,8 @@ class RadarBinSequenceDataset(Dataset):
         self.radar_height = radar_height
         self.load_config = load_config
         self.transform = transform
+        self.mean = mean
+        self.std = std
         self.phase = phase
 
         # 构建样本列表：每个元素为 (pointcloud_dir, label, config_path)
@@ -220,30 +215,25 @@ class RadarBinSequenceDataset(Dataset):
     def _scan_root(self, root_dir):
         """递归查找所有包含 .bin 文件的 pointcloud 子目录"""
         for root, dirs, files in os.walk(root_dir):
+            # 仅当存在 'pointcloud' 子目录且其中有 .bin 文件时添加
             if 'pointcloud' in dirs:
                 pc_dir = os.path.join(root, 'pointcloud')
-                # 检查该目录下是否有 .bin 文件
                 if any(f.endswith('.bin') for f in os.listdir(pc_dir)):
                     config_path = os.path.join(root, 'radar_config.json') if os.path.exists(os.path.join(root, 'radar_config.json')) else None
                     self.samples.append((pc_dir, None, config_path))
-            # 如果当前目录已有 .bin 文件，也视为一个样本（可能是直接存储 bin 的文件夹）
-            elif any(f.endswith('.bin') for f in files):
-                config_path = os.path.join(root, 'radar_config.json') if os.path.exists(os.path.join(root, 'radar_config.json')) else None
-                self.samples.append((root, None, config_path))
 
     def _auto_label(self):
-        """自动生成标签：从文件夹名提取标识，例如 walk_obj1_1_... -> 'obj1'"""
+        """自动生成标签：从父目录名（行走文件夹名）中提取标识，例如 walk_obj1_1_... -> 'obj1'"""
         labels_set = {}
         for i, (folder, _, cfg) in enumerate(self.samples):
-            base = os.path.basename(folder)
-            # 假设命名规则为 walk_obj1_1_...，提取 obj1 部分
+            # 获取父目录名（行走文件夹名）
+            parent_dir = os.path.basename(os.path.dirname(folder))
             import re
-            m = re.search(r'(obj\d+)', base)
+            m = re.search(r'(obj\d+)', parent_dir)
             if m:
-                ident = m.group(1)
+                ident = m.group(1)          # 如 'obj1'
             else:
-                # 取父目录名
-                ident = os.path.basename(os.path.dirname(folder))
+                ident = parent_dir           # 后备方案
             if ident not in labels_set:
                 labels_set[ident] = len(labels_set)
             self.samples[i] = (folder, labels_set[ident], cfg)
@@ -277,21 +267,52 @@ class RadarBinSequenceDataset(Dataset):
             return angle, height
         except Exception:
             return self.install_angle, self.radar_height
+        
+    def _normalize_points(self, pts):
+        """标准化点云特征： (pts - mean) / (std + eps)"""
+        if self.mean is None or self.std is None:
+            return pts
+        eps = 1e-8
+        return (pts - self.mean) / (self.std + eps)
+
+    def _augment_points(self, pts):
+        """数据增强：随机旋转、添加高斯噪声、随机丢弃点"""
+        # 1. 随机旋转（绕 Z 轴，仅对坐标）
+        if np.random.rand() > 0.7:  # 70% 概率做旋转
+            theta = np.random.uniform(-np.pi/18, np.pi/18)  # ±10度
+            rot_mat = np.array([
+                [np.cos(theta), -np.sin(theta), 0],
+                [np.sin(theta), np.cos(theta), 0],
+                [0, 0, 1]
+            ])
+            pts[:, :3] = pts[:, :3] @ rot_mat.T
+
+        # 2. 添加高斯噪声（仅对坐标和速度，功率不加噪声）
+        if np.random.rand() > 0.5:  # 50% 概率加噪声
+            noise = np.random.normal(0, 0.02, size=pts[:, :4].shape)
+            pts[:, :4] += noise
+
+        # 3. 随机丢弃点（模拟遮挡）
+        if np.random.rand() > 0.6:  # 40% 概率丢弃
+            keep_ratio = np.random.uniform(0.7, 1.0)
+            num_points = pts.shape[0]
+            keep_idx = np.random.choice(num_points, int(num_points * keep_ratio), replace=False)
+            pts = pts[keep_idx, :]
+
+        return pts
 
     def __getitem__(self, idx):
         folder, label, config_path = self.samples[idx]
 
-        # 获取该样本的雷达安装参数
         if self.load_config and config_path and os.path.exists(config_path):
             angle, height = self._load_config(config_path)
         else:
             angle, height = self.install_angle, self.radar_height
 
-        # 获取所有 bin 文件并排序
         bin_files = sorted([f for f in os.listdir(folder) if f.endswith('.bin')])
         if not bin_files:
-            # 空样本，返回全零张量，并给出警告（可打印）
-            frames = torch.zeros(self.target_frame_num, self.target_point_num, 3)
+            # 空样本，返回全零张量（维度改为5）
+            frames = torch.zeros(self.target_frame_num, self.target_point_num, 5)
             valid_len = 0
             info = f"{folder} (empty)"
             return frames, label, info
@@ -304,36 +325,37 @@ class RadarBinSequenceDataset(Dataset):
                 continue
             # 采样至固定点数
             pts = self._sample_points(pts, self.target_point_num)
+            # 确保形状正确
+            if pts.shape[0] != self.target_point_num:
+                print(f"警告：采样后点数 {pts.shape[0]} != {self.target_point_num}")
+                continue
             if self.transform:
                 pts = self.transform(pts)
             frames.append(pts)
 
         if not frames:
-            # 所有帧解析失败，返回全零
-            frames_tensor = torch.zeros(self.target_frame_num, self.target_point_num, 3)
+            # 所有帧解析失败，返回全零（维度改为5）
+            frames_tensor = torch.zeros(self.target_frame_num, self.target_point_num, 5)
             valid_len = 0
         else:
-            # 堆叠成 (T_orig, N, 3) 的张量
+            # 堆叠成 (T_orig, N, 5) 的张量
             frames_tensor = torch.from_numpy(np.stack(frames, axis=0)).float()
 
             T = frames_tensor.shape[0]
             if T >= self.target_frame_num:
                 if self.phase == 'train':
-                    # 随机裁剪
                     start = np.random.randint(0, T - self.target_frame_num + 1)
                     frames_tensor = frames_tensor[start:start+self.target_frame_num]
                     valid_len = self.target_frame_num
                 else:
-                    # 取前 target_frame_num 帧
                     frames_tensor = frames_tensor[:self.target_frame_num]
                     valid_len = self.target_frame_num
             else:
-                # 填充零帧
-                pad = torch.zeros(self.target_frame_num - T, self.target_point_num, 3)
+                # 填充零帧（维度改为5）
+                pad = torch.zeros(self.target_frame_num - T, self.target_point_num, 5)
                 frames_tensor = torch.cat([frames_tensor, pad], dim=0)
                 valid_len = T
 
-        # 返回样本、标签、定位字符串（文件夹路径）
         info = folder
         return frames_tensor, label, info
 
@@ -400,8 +422,17 @@ if __name__ == "__main__":
         plt.show()
 
 
-    def process_folder(folder_path, install_angle, radar_height):
-        """处理 pointcloud 文件夹，逐帧显示点云（按任意键继续）"""
+    def process_folder(folder_path, install_angle, radar_height, interval=0.1):
+        """
+        连续播放 pointcloud 文件夹中的所有帧，使用固定坐标轴、彩色轴线/网格，
+        点云按 Z 高度着色，支持按 Q 键退出。
+        
+        Args:
+            folder_path (str): 包含 .bin 文件的文件夹路径
+            install_angle (float): 雷达安装俯仰角（度）
+            radar_height (float): 雷达安装高度（米）
+            interval (float): 帧间延迟（秒），默认 0.1
+        """
         if not os.path.isdir(folder_path):
             print(f"[ERROR] 文件夹不存在: {folder_path}")
             return
@@ -411,21 +442,160 @@ if __name__ == "__main__":
             print(f"[ERROR] 文件夹中无 .bin 文件: {folder_path}")
             return
 
-        print(f"找到 {len(bin_files)} 个 .bin 文件，将逐帧显示。按任意键查看下一帧，按 Q 退出...")
+        print(f"找到 {len(bin_files)} 个 .bin 文件，将连续播放（间隔 {interval} 秒）。按 Q 键退出...")
+
+        # ---------- 固定坐标轴范围（雷达为原点） ----------
+        # 根据实际场景设定：X 前（0~5），Y 左右（-1~1），Z 高度（1~3，雷达高2米）
+        x_lim = (-1.0, 5.0)
+        y_lim = (-1.0, 1.0)
+        z_lim = (1.0, 3.0)
+
+        # ---------- 交互模式开启 ----------
+        plt.ion()
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # ---------- 设置坐标轴外观 ----------
+        # 轴标签颜色
+        ax.xaxis.label.set_color('red')
+        ax.yaxis.label.set_color('green')
+        ax.zaxis.label.set_color('blue')
+        ax.tick_params(axis='x', colors='red')
+        ax.tick_params(axis='y', colors='green')
+        ax.tick_params(axis='z', colors='blue')
+        ax.set_xlabel('X (m) - Front')
+        ax.set_ylabel('Y (m) - Left')
+        ax.set_zlabel('Z (m) - Height')
+
+        # 固定范围
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.set_zlim(z_lim)
+
+        # ---------- 绘制显式的坐标轴线条（从原点出发到范围边界） ----------
+        # X 轴（红色）
+        ax.plot([0, x_lim[1]], [0, 0], [0, 0], color='red', linewidth=3, alpha=0.8)
+        ax.plot([0, x_lim[0]], [0, 0], [0, 0], color='red', linewidth=3, alpha=0.8)  # 负方向
+        # Y 轴（绿色）
+        ax.plot([0, 0], [0, y_lim[1]], [0, 0], color='green', linewidth=3, alpha=0.8)
+        ax.plot([0, 0], [0, y_lim[0]], [0, 0], color='green', linewidth=3, alpha=0.8)
+        # Z 轴（蓝色）
+        ax.plot([0, 0], [0, 0], [0, z_lim[1]], color='blue', linewidth=3, alpha=0.8)
+        ax.plot([0, 0], [0, 0], [0, z_lim[0]], color='blue', linewidth=3, alpha=0.8)
+
+        # 在原点添加一个小球体表示雷达位置
+        ax.scatter(0, 0, 0, color='black', s=50, marker='o', alpha=0.7)
+
+        # ---------- 添加辅助网格线（增强空间感） ----------
+        # 在三个主要平面上绘制半透明网格线
+        # XY 平面 (z=0)
+        grid_xy_color = (0.5, 0.5, 0.5, 0.3)
+        for x in np.arange(x_lim[0], x_lim[1] + 0.5, 0.5):
+            ax.plot([x, x], [y_lim[0], y_lim[1]], [0, 0], color=grid_xy_color, linewidth=0.8)
+        for y in np.arange(y_lim[0], y_lim[1] + 0.5, 0.5):
+            ax.plot([x_lim[0], x_lim[1]], [y, y], [0, 0], color=grid_xy_color, linewidth=0.8)
+
+        # XZ 平面 (y=0)
+        for x in np.arange(x_lim[0], x_lim[1] + 0.5, 0.5):
+            ax.plot([x, x], [0, 0], [z_lim[0], z_lim[1]], color=grid_xy_color, linewidth=0.8)
+        for z in np.arange(z_lim[0], z_lim[1] + 0.5, 0.5):
+            ax.plot([x_lim[0], x_lim[1]], [0, 0], [z, z], color=grid_xy_color, linewidth=0.8)
+
+        # YZ 平面 (x=0)
+        for y in np.arange(y_lim[0], y_lim[1] + 0.5, 0.5):
+            ax.plot([0, 0], [y, y], [z_lim[0], z_lim[1]], color=grid_xy_color, linewidth=0.8)
+        for z in np.arange(z_lim[0], z_lim[1] + 0.5, 0.5):
+            ax.plot([0, 0], [y_lim[0], y_lim[1]], [z, z], color=grid_xy_color, linewidth=0.8)
+
+        # 添加一个简单的半透明框体（可选）
+        # 绘制立方体边框（轻量级）
+        edges = [
+            [x_lim[0], y_lim[0], z_lim[0]], [x_lim[1], y_lim[0], z_lim[0]],
+            [x_lim[1], y_lim[1], z_lim[0]], [x_lim[0], y_lim[1], z_lim[0]],
+            [x_lim[0], y_lim[0], z_lim[1]], [x_lim[1], y_lim[0], z_lim[1]],
+            [x_lim[1], y_lim[1], z_lim[1]], [x_lim[0], y_lim[1], z_lim[1]]
+        ]
+        edge_connections = [
+            (0,1), (1,2), (2,3), (3,0),
+            (4,5), (5,6), (6,7), (7,4),
+            (0,4), (1,5), (2,6), (3,7)
+        ]
+        for start, end in edge_connections:
+            ax.plot([edges[start][0], edges[end][0]],
+                    [edges[start][1], edges[end][1]],
+                    [edges[start][2], edges[end][2]],
+                    color='gray', linewidth=0.5, alpha=0.3)
+
+        # ---------- 初始化空散点图（稍后更新） ----------
+        sc = ax.scatter([], [], [], c=[], cmap='viridis', s=10, alpha=0.7, vmin=z_lim[0], vmax=z_lim[1])
+        cbar = plt.colorbar(sc, ax=ax, label='Height (m)')
+        title = ax.set_title('')
+
+        # ---------- 键盘事件（按 Q 退出） ----------
+        running = True
+        def on_key(event):
+            nonlocal running
+            if event.key == 'q':
+                running = False
+                plt.close(fig)
+        fig.canvas.mpl_connect('key_press_event', on_key)
+
+        # ---------- 播放循环 ----------
         for i, fname in enumerate(bin_files):
+            if not running:
+                break
+
             bin_path = os.path.join(folder_path, fname)
             points = parse_radar_bin(bin_path, install_angle, radar_height)
-            if points is None:
+            if points is None or len(points) == 0:
                 print(f"[WARN] 第 {i+1} 帧解析失败: {fname}")
                 continue
-            print(f"第 {i+1}/{len(bin_files)} 帧: {fname}, 点数={len(points)}")
-            visualize_points(points, title=f"Frame {i+1}: {fname}")
 
-            # 等待用户按键继续
-            ans = input("按 Enter 继续，Q 退出：").strip().lower()
-            if ans == 'q':
-                break
-            plt.close('all')
+            # 更新散点图数据
+            sc._offsets3d = (points[:, 0], points[:, 1], points[:, 2])
+            sc.set_array(points[:, 2])          # 按 Z 高度着色
+            # 更新颜色条范围（避免超出）
+            sc.set_clim(vmin=points[:, 2].min(), vmax=points[:, 2].max())
+            cbar.update_normal(sc)
+
+            title.set_text(f"Frame {i+1}/{len(bin_files)}: {fname} (points: {len(points)})")
+            plt.draw()
+            plt.pause(interval)
+
+        plt.ioff()
+        if running:
+            print("播放完成，按任意键关闭窗口...")
+            input()
+            plt.close(fig)
+        else:
+            print("用户中断")
+
+    # def process_folder(folder_path, install_angle, radar_height):
+    #     """处理 pointcloud 文件夹，逐帧显示点云（按任意键继续）"""
+    #     if not os.path.isdir(folder_path):
+    #         print(f"[ERROR] 文件夹不存在: {folder_path}")
+    #         return
+
+    #     bin_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.bin')])
+    #     if not bin_files:
+    #         print(f"[ERROR] 文件夹中无 .bin 文件: {folder_path}")
+    #         return
+
+    #     print(f"找到 {len(bin_files)} 个 .bin 文件，将逐帧显示。按任意键查看下一帧，按 Q 退出...")
+    #     for i, fname in enumerate(bin_files):
+    #         bin_path = os.path.join(folder_path, fname)
+    #         points = parse_radar_bin(bin_path, install_angle, radar_height)
+    #         if points is None:
+    #             print(f"[WARN] 第 {i+1} 帧解析失败: {fname}")
+    #             continue
+    #         print(f"第 {i+1}/{len(bin_files)} 帧: {fname}, 点数={len(points)}")
+    #         visualize_points(points, title=f"Frame {i+1}: {fname}")
+
+    #         # 等待用户按键继续
+    #         ans = input("按 Enter 继续，Q 退出：").strip().lower()
+    #         if ans == 'q':
+    #             break
+    #         plt.close('all')
 
 
     def main():

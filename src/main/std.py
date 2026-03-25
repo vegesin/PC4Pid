@@ -102,9 +102,9 @@ log: myLogger = logger_init(log_level_idx=0, save_log=False, save_dir=None)
 # > ------------------------ 环境导入结束，开始用户配置 ------------------------
 class Settings:
     # --- 基础配置 ---
-    experiment_name = "std" # 实验名，决定结果保存路径
-    mode = "run_train_test"                      # 模式: "run_train" | "run_test" | run_train_test |run_profile
-    device = "cuda:3"                            # 设备: "cuda:x" | "cpu"
+    experiment_name = "radar_identification" # 实验名，决定结果保存路径
+    mode = "run_train"                      # 模式: "run_train" | "run_test" | run_train_test |run_profile
+    device = "cuda:0"                            # 设备: "cuda:x" | "cpu"
 
     # 输出结果路径配置 (None表示使用默认规则，config类中定义的方法进行默认相关依赖处理)
     save_dir = None
@@ -112,13 +112,15 @@ class Settings:
 
     # --- 模型配置 ---
 
-    model_name = "model_name"
+    model_name = "pointnet_seq"
+    num_classes = 11    # 新增：实际人数
 
-
+    use_normalization = True                      # 是否启用特征归一化
+    stats_path = "F:/radar_data/train_stats.pkl"  # 统计量文件路径（根据你实际保存的位置）
 
     # --- 数据配置  ---
     # 正常训练推理使用数据集
-    dataset_name = "ipix_tfg_all"
+    dataset_name = "radar_bin"
 
     # SNN 仅使用正类，统计正类的神经元发射率
     # dataset_name = "ipix_tfg_all_pos"
@@ -127,13 +129,22 @@ class Settings:
 
     # 数据路径
     # TODO: 针对雷达点云数据的加载
+    train_path = "F:/radar_data/train"   # 手动划分后的训练集文件夹
+    val_path   = "F:/radar_data/val"     # 验证集文件夹
+    test_path  = "F:/radar_data/test"    # 测试集文件夹
 
+    # 雷达数据预处理参数
+    target_frame_num = 200
+    target_point_num = 128
+    install_angle = 25.0
+    install_height = 2.0
+    load_config = True
 
 
     # --- 训练参数 ---
-    batch_size = 16
-    num_epochs = 100
-    num_workers = 8
+    batch_size = 4
+    num_epochs = 50
+    num_workers = 0
 
     optimizer_type = "adam"
     learning_rate = 1e-3
@@ -142,7 +153,7 @@ class Settings:
 
     min_lr = 1e-6
 
-    loss_func = "bce_with_logits"
+    loss_func = "ce"
 
     pfa = 1e-3            # 虚警率
     logits_process = "z1" # 兼容参数

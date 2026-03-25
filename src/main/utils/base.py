@@ -116,6 +116,16 @@ class Config:
     # TODO  后续组件以及当前组件配置针对None缺失参数进行配置兼容
     # TODO  框架兼容配置中这些参数后续是要修复的
     """
+
+    # 新增以下字段（可放在最后）
+    num_classes: int = None
+    target_frame_num: int = 200
+    target_point_num: int = 128
+    install_angle: float = 25.0
+    install_height: float = 2.0
+    load_config: bool = True
+    use_normalization = True                      # 是否启用特征归一化
+    stats_path = "F:/radar_data/train_stats.pkl"  # 统计量文件路径（根据你实际保存的位置）
     # --------------------------------------------------------
     # 基础配置
     # --------------------------------------------------------
