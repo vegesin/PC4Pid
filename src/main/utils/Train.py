@@ -11,8 +11,8 @@ import sys
 import csv
 import datetime
 
-from drjit import device
-from pytorch_lightning import data_loader
+# from drjit import device
+# from pytorch_lightning import data_loader
 from tqdm import tqdm
 
 import torch
@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 
-from spikingjelly.clock_driven import functional # 新版本存在类检查
+# from spikingjelly.clock_driven import functional # 新版本存在类检查
 
 from .build import *
 from .base import *

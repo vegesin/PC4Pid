@@ -21,6 +21,9 @@ from .loss import *
 
 from src.datasets.ipix_dataset import *
 
+from src.datasets.parse_point_cloud_data import RadarBinSequenceDataset
+from src.models.pointnet_seq import PointNetSequenceClassifier
+
 
 
 def build_model(cfg: Config):
@@ -34,8 +37,9 @@ def build_model(cfg: Config):
     
     match cfg.model_name:
 
-        case "model_name":
-            model = None
+        case "pointnet_seq":
+            num_classes = getattr(cfg, 'num_classes', 11)  # 从 cfg 读取人数
+            model = PointNetSequenceClassifier(num_classes=num_classes)
             
 
 
@@ -54,6 +58,8 @@ def build_loss_func(cfg: Config):
             return torch.nn.BCELoss()
         case "bce_with_logits":
             return torch.nn.BCEWithLogitsLoss()
+        case "ce":
+            return torch.nn.CrossEntropyLoss()
 
         # TODO：cfg中传入一个初始化好的损失函数对象直接返回这个对象
         case _:
@@ -168,6 +174,51 @@ def build_dataset(cfg: Config, data_path, **kwargs):
             return ipix_tfg_all_dataset(file_paths=data_path, only_positive=True, **kwargs)
         case "ipix_mdccnn":
             return ipix_mdccnn_dataset(file_paths=data_path, **kwargs)
+        case "radar_bin":
+            # 从 cfg 中读取参数，提供默认值
+            target_frame_num = getattr(cfg, 'target_frame_num', 200)
+            target_point_num = getattr(cfg, 'target_point_num', 128)
+            install_angle = getattr(cfg, 'install_angle', 25.0)
+            radar_height = getattr(cfg, 'install_height', 2.0)
+            load_config = getattr(cfg, 'load_config', True)
+            phase = kwargs.get('phase', 'train')   # 由调用者传入 'train'/'val'/'test'
+            
+            # ========== 新增：加载训练集统计量 ==========
+            mean = None
+            std = None
+            # 只有在归一化功能启用时才加载统计量（可通过 cfg 增加一个开关，默认开启）
+            # 这里默认加载，如果文件不存在则跳过（mean/std 保持 None，Dataset 内不做归一化）
+            if hasattr(cfg, 'use_normalization') and cfg.use_normalization:
+                stats_path = getattr(cfg, 'stats_path', None)
+                if stats_path is None:
+                    # 默认路径，可根据需要调整
+                    stats_path = os.path.join(os.path.dirname(data_path), 'train_stats.pkl')
+                if os.path.exists(stats_path):
+                    try:
+                        import pickle
+                        with open(stats_path, 'rb') as f:
+                            stats = pickle.load(f)
+                            mean = stats['mean']
+                            std = stats['std']
+                            log.note(f"成功加载归一化统计量: {stats_path}")
+                    except Exception as e:
+                        log.warning(f"加载统计量失败: {e}，将不使用归一化")
+                else:
+                    log.warning(f"未找到统计量文件: {stats_path}，将不使用归一化")
+            # ==========================================
+            
+            dataset = RadarBinSequenceDataset(
+                data_source=data_path,
+                target_frame_num=target_frame_num,
+                target_point_num=target_point_num,
+                install_angle=install_angle,
+                radar_height=radar_height,
+                load_config=load_config,
+                phase=phase,
+                mean=mean,          # 新增
+                std=std             # 新增
+            )
+            return dataset
 
         case _:
             raise ValueError(f"Unknown dataset: {cfg.dataset_name}")
@@ -206,7 +257,7 @@ def build_loaders(cfg: Config):
 
         case "train":
             # 训练模式 (返回 单个train 无校验)
-            train_ds = build_dataset(cfg, cfg.train_path)
+            train_ds = build_dataset(cfg, cfg.train_path, phase='train')
             loaders['train'] = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
 
         case "train_val":
@@ -218,8 +269,8 @@ def build_loaders(cfg: Config):
             seed = getattr(cfg, 'seed')
 
             # 训练模式 (返回 单个train 和 val)
-            train_ds = build_dataset(cfg, cfg.train_path, target_clutter_ratio=train_tc_ratio, seed=seed)
-            val_ds = build_dataset(cfg, cfg.val_path, target_clutter_ratio=val_tc_ratio, seed=seed)
+            train_ds = build_dataset(cfg, cfg.train_path, target_clutter_ratio=train_tc_ratio, seed=seed, phase='train')
+            val_ds = build_dataset(cfg, cfg.val_path, target_clutter_ratio=val_tc_ratio, seed=seed, phase='val')
 
             loaders['train'] = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
             loaders['val'] = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
@@ -233,8 +284,8 @@ def build_loaders(cfg: Config):
             test_tc_ratio = getattr(cfg, 'test_tc_ratio', None)
             seed = getattr(cfg, 'seed')
 
-            train_ds = build_dataset(cfg, cfg.train_path, target_clutter_ratio=train_tc_ratio, seed=seed)
-            test_ds = build_dataset(cfg, cfg.test_path, target_clutter_ratio=test_tc_ratio, seed=seed)
+            train_ds = build_dataset(cfg, cfg.train_path, target_clutter_ratio=train_tc_ratio, seed=seed, phase='train')
+            test_ds = build_dataset(cfg, cfg.test_path, target_clutter_ratio=test_tc_ratio, seed=seed, phase='test')
 
             # 传入list 之后 basename 报错
             # train_name = os.path.basename(cfg.train_path)
@@ -250,9 +301,9 @@ def build_loaders(cfg: Config):
             test_tc_ratio = getattr(cfg, 'test_tc_ratio', None)
             seed = getattr(cfg, 'seed')
 
-            train_ds = build_dataset(cfg, cfg.train_path, target_clutter_ratio=train_tc_ratio, seed=seed)
-            val_ds = build_dataset(cfg, cfg.val_path, target_clutter_ratio=val_tc_ratio, seed=seed)
-            test_ds = build_dataset(cfg, cfg.test_path, target_clutter_ratio=test_tc_ratio, seed=seed)
+            train_ds = build_dataset(cfg, cfg.train_path, target_clutter_ratio=train_tc_ratio, seed=seed, phase='train')
+            val_ds = build_dataset(cfg, cfg.val_path, target_clutter_ratio=val_tc_ratio, seed=seed, phase='val')
+            test_ds = build_dataset(cfg, cfg.test_path, target_clutter_ratio=test_tc_ratio, seed=seed, phase='test')
 
             loaders['train'] = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
             loaders['val'] = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
@@ -261,8 +312,8 @@ def build_loaders(cfg: Config):
         case "test_ipix_single_with_cfar":
             # 传入单独的train和test路径，使用train计算虚警门限，在test上面进行验证Pd
 
-            train_ds = build_dataset(cfg, cfg.train_path)
-            test_ds = build_dataset(cfg, cfg.test_path)
+            train_ds = build_dataset(cfg, cfg.train_path, phase='train')
+            test_ds = build_dataset(cfg, cfg.test_path, phase='test')
 
             train_f_name = os.path.basename(cfg.train_path)
             test_f_name = os.path.basename(cfg.test_path)
