@@ -1,155 +1,389 @@
-# DeepLearning  训练框架说明文档
+# 深度学习训练测试框架
 
-这是一个模块化、易扩展的深度学习训练框架。框架集成了配置管理、模型构建、自动日志、可视化及标准化的训练/测试流程。
+## 快速开始
 
----
-
-## 🚀 快速启动 (Quick Start)
-
-### 1. 环境准备
-
-确保已安装 Python 3.8+ 及 PyTorch 环境。
-当前缺少requirements.txt
-脉冲神经网络需要使用部分相关库
+安装依赖：
 
 ```bash
 pip install -r requirements.txt
-
 ```
 
-### 2. 运行默认演示
-
-框架提供了标准启动脚本 `std.py`，默认配置下即可运行。
+运行一个实验启动脚本：
 
 ```bash
-# 确保在项目根目录下
-python src/main/std.py
-
+python src/runner/ours_train.py
 ```
 
-### 3. 使用 GPU 运行
-
-指定设备参数：
+也可以运行标准示例：
 
 ```bash
-python src/main/std.py --device cuda:0
-
+python src/runner/std.py
 ```
 
----
+如果使用 JSON 配置，可以通过主入口传入：
 
-## 📂 框架结构说明
+```bash
+python -m src.main.main --config configs/exp.json
+```
+
+## 项目结构
 
 ```text
 SNN/
-├── configs/                 # JSON 配置文件存储目录
-├── logs/                    # 运行日志
-├── results/                 # 实验结果 (Checkpoints, Visualizations)
+├── README.md
 ├── src/
-│   ├── datasets/            # 数据集定义 (IPIX, etc.)
-│   ├── models/              # 模型定义 (SNN, CNN, Transformers)
-│   └── main/
-│       ├── std.py           # [核心] 标准启动脚本 (入口)
-│       └── utils/
-│           ├── base.py      # 配置类 (Config) 及基础工具
-│           ├── build.py     # 工厂模式构建器 (Model, Loader, Optimizer)
-│           ├── Train.py     # 训练器 (Trainer) 执行逻辑
-│           └── loss.py      # 自定义损失函数
-└── README.md                # 说明文档
-
+│   ├── datasets/
+│   │   └── ipix_dataset.py        # IPIX 相关 Dataset 与内置数据集注册
+│   ├── main/
+│   │   ├── base.py                # 分层配置 dataclass
+│   │   ├── main.py                # 框架主入口与 mode 分发
+│   │   ├── train.py               # Trainer 训练/测试/profile 流程
+│   │   ├── model_factory.py       # 模型创建
+│   │   ├── train_factory.py       # loss / optimizer / scheduler / save path 创建
+│   │   ├── data_factory.py        # dataset / dataloader 创建与数据划分
+│   │   ├── metrics.py             # 指标函数
+│   │   ├── loss.py                # loss 函数
+│   │   └── logger.py              # 日志模块
+│   ├── models/                    # 模型定义
+│   ├── runner/                    # 实验启动脚本
+│   ├── scripts/                   # 数据处理和调试脚本
+│   └── utils/
+│       └── func.py                # 通用工具函数
 ```
 
----
+当前设计中：
 
-## 📖 使用说明
+- `src/runner/` 只负责配置实验参数并调用 `launch()`。
+- `src/main/main.py` 负责读取配置、创建 `Trainer`、按 `mode` 分发任务。
+- `src/main/base.py` 定义分层配置对象。
+- `src/main/*_factory.py` 负责按功能创建组件。
+- `src/datasets/` 负责具体数据集读取、采样和数据格式处理。
 
-本框架支持 **"脚本内直接配置"** 和 **"JSON 外部配置"** 两种模式，优先级：`JSON > 脚本内 Settings`。
+## 配置结构
 
-### 1. 配置参数详解
-
-核心配置位于启动脚本 (`src/main/std.py`) 或 JSON 文件中，主要参数如下：
-
-| 模块 | 参数名 | 说明 |
-| --- | --- | --- |
-| **基础** | `experiment_name` | 实验名称，自动生成结果保存目录 `results/{name}/` |
-|  | `mode` | 运行模式：`run_train` (训练+验证) / `run_test` (测试) |
-|  | `device` | 运行设备，如 `cuda:0` 或 `cpu` |
-| **模型** | `model_name` | 模型架构名称 (如 `skpformer`, `snn_ipix`) |
-|  | `beta` | (SNN专用) 膜电位衰减因子 |
-| **数据** | `dataset_name` | 数据集名称 (如 `ipix_tfg`) |
-|  | `loader` | 加载模式 (如 `train_val`, `test_ipix_single_with_cfar`) |
-| **训练** | `save_dir` | 设为 `None` 时自动根据实验名生成，否则使用指定路径 |
-
-### 2. 开发调试模式 (推荐)
-
-直接修改 `src/main/std.py` 中的 `Settings` 类变量。
+配置采用分层 dataclass，而不是一个扁平 `cfg` 传到底。入口脚本一般写成：
 
 ```python
+from src.main.base import DataConfig, EvalConfig, ModelConfig, RunConfig, TrainConfig
+from src.main.main import launch
+
+
 class Settings:
-    experiment_name = "debug_exp_01"
-    mode = "run_train"
-    model_name = "skpformer"
-    # ... 修改变量即可生效
+    run = RunConfig(
+        experiment_name="exp_name",
+        mode="run_train",
+        device="cuda:0",
+    )
 
+    model = ModelConfig(
+        model_name="my_spike_net",
+        num_steps=4,
+        extra={},
+    )
+
+    data = DataConfig(
+        dataset_name="ipix_tfg_all",
+        loader_mode="train_val_test",
+        train_path="path/to/train.npz",
+        val_path="path/to/val.npz",
+        test_path="path/to/test.npz",
+        batch_size=16,
+        num_workers=8,
+        extra={
+            "tc_ratio": 1 / 3,
+            "seed": 42,
+        },
+    )
+
+    train = TrainConfig(
+        num_epochs=100,
+        optimizer_type="adam",
+        scheduler_type="cosine",
+        learning_rate=1e-3,
+        min_lr=1e-6,
+        loss_func="bce_with_logits",
+    )
+
+    eval = EvalConfig(
+        pfa=1e-3,
+        logits_process="z1",
+    )
+
+
+if __name__ == "__main__":
+    launch(settings_cls=Settings)
 ```
 
-### 3. 正式实验模式
+### 配置分组
 
-编写 JSON 配置文件（例如 `configs/exp_v1.json`），通过命令行加载：
+- `RunConfig`：实验名、运行模式、设备、保存路径、加载权重路径。
+- `ModelConfig`：模型名、时间步数、模型额外参数。
+- `DataConfig`：数据集名、loader 模式、数据路径、batch size、worker 数。
+- `TrainConfig`：epoch、优化器、学习率、scheduler、loss。
+- `EvalConfig`：虚警率、logits 后处理方式、指标函数。
 
-```bash
-python src/main/std.py --config configs/exp_v1.json
+每个子配置都有 `extra` 字段，用来放当前模块的扩展参数。原则是：
 
+- 通用字段放在主配置字段中。
+- 模型、数据集、训练策略的专用参数放进对应的 `extra`。
+- 底层函数只接收自己需要的参数，不再依赖一个全局 `cfg`。
+
+## 运行模式
+
+`RunConfig.mode` 由 `Trainer` 分发，目前常用模式包括：
+
+- `run_train`：训练模型。
+- `run_test`：加载模型并测试。
+- `run_train_test`：训练后执行测试。
+- `run_profile`：统计模型参数量、推理耗时等 profile 信息。
+
+具体支持的模式以 [src/main/train.py](src/main/train.py) 中 `Trainer` 方法为准。
+
+## Factory 分层
+
+框架将原来的单个 `build.py` 拆成三个工厂文件：
+
+### model_factory.py
+
+负责模型创建：
+
+```python
+build_model(model_name, num_steps, model_extra)
 ```
 
-### 4. 后台挂起训练
+模型专用参数从 `ModelConfig.extra` 进入，并在模型工厂内部按需要解包。
 
-```bash
-nohup python3 -u src/main/std.py > logs/exp_run.log 2>&1 &
+### train_factory.py
 
+负责训练组件创建：
+
+```python
+build_loss_func(loss_name)
+build_optimizer(model, optimizer_type, learning_rate, weight_decay)
+build_scheduler(optimizer, scheduler_type, num_epochs, min_lr)
+build_save_path(save_dir)
 ```
 
----
+### data_factory.py
 
-## 📅 未来开发计划 (Roadmap)
+负责数据链路：
 
-### 🛠️ 框架优化
+```python
+build_dataset(...)
+plan_base_datasets(...)
+attach_threshold_dataset(...)
+build_dataloaders(...)
+build_data_components(...)
+```
 
-* [x] **配置系统重构**：实现 `Config` 数据类与 JSON 的解耦加载。
-* [x] **标准化启动脚本**：完成 `std.py`，支持变量赋值式配置。
-* [ ] **参数灵活覆盖**：允许用户通过外部脚本自定义组件（如 `net`, `dataset`）直接传入 Trainer，覆盖默认 `build` 逻辑。
-* [ ] **参数校验防呆**：增加配置参数的类型检查和依赖检查。
+`Trainer` 只调用 `build_data_components(data_cfg)`，最终拿到一个 loader 字典：
 
-### 🚀 训练与推理
+```python
+{
+    "train": train_loader,
+    "val": val_loader,
+    "test": test_loader,
+    "get_th": threshold_loader,
+}
+```
 
-* [x] **可视化**：集成进度条 (tqdm) 显示。
-* [x] **模型管理**：支持 Checkpoint 保存、最优指标 (`Best Acc/Lowest Loss`) 自动保存。
-* [ ] **断点续训**：支持从 Checkpoint 恢复训练状态（需固定 Random Seed）。
-* [x] **推理流程**：完成模型载入、推理测试、指标计算。
-* [ ] **高级可视化**：集成 TensorBoard 或 WandB 记录 Loss 曲线。
+其中不存在的 loader 不会出现在字典中。
 
-### 📦 数据处理
+## 数据集说明
 
-* [x] **Dataloader 封装**：支持通过 `loader` 参数切换不同的数据加载策略 (Train/Val/Test/CFAR)。
+### Dataset 基本接口
 
-### 📝 日志系统
+框架推荐所有 dataset 使用统一入口：
 
-* [x] **彩色日志**：自定义 Logger，支持不同级别的颜色高亮。
-* [x] **文件分流**：支持控制台输出与日志文件保存同步进行。
+```python
+DatasetClass(file_paths, **kwargs)
+```
 
----
+其中：
 
-## 📝 版本更新记录
+- `file_paths`：数据文件路径，支持字符串或路径列表。
+- `**kwargs`：数据集内部参数，例如 `tc_ratio`、`seed`、`only_positive`、`save_rest_clutter`。
 
-### v0.2.0
+数据集内部自行决定需要读取哪些参数。多传但未使用的参数默认不影响运行。
 
-* **Refactor**: 引入 `std.py` 标准启动脚本，通过 `Settings` 类实现“变量即配置”。
-* **Fix**: 修复了 Logger 在 Root Logger 开启传播时导致日志重复打印的问题。
-* **Feat**: 完善了 `Config` 类的 `__post_init__` 逻辑，支持自动路径生成。
+### 内置 IPIX 数据集
 
-### v0.1.0
+当前内置数据集定义在 [src/datasets/ipix_dataset.py](src/datasets/ipix_dataset.py)：
 
-* 初始化项目结构。
+- `ipix`：原始 `.npy` IPIX 数据。
+- `ipix_tfg`：单个 `.npz` TFG 数据。
+- `ipix_tfg_all`：合并多个 `.npz` TFG 数据，并支持重采样。
+- `ipix_tfg_all_pos`：只保留正样本的 TFG 数据。
+- `ipix_mdccnn`：MDCCNN 输入格式数据。
 
----
+这些内置数据集通过注册表注册：
 
+```python
+@register_dataset("ipix_tfg_all")
+class ipix_tfg_all_dataset(Dataset):
+    ...
+```
+
+`data_factory.py` 使用字符串 `dataset_name` 查找注册表并创建 dataset。
+
+### 自定义数据集
+
+自定义数据集有两种接入方式。
+
+方式一：直接在 runner 中传入 dataset 类或构造函数：
+
+```python
+data = DataConfig(
+    dataset_name=MyDataset,
+    loader_mode="train_val_test",
+    train_path="train.xxx",
+    val_path="val.xxx",
+    test_path="test.xxx",
+)
+```
+
+要求 `MyDataset` 支持：
+
+```python
+MyDataset(file_paths, **kwargs)
+```
+
+方式二：注册为内置数据集：
+
+```python
+from src.datasets.ipix_dataset import register_dataset
+
+
+@register_dataset("my_dataset")
+class MyDataset(Dataset):
+    ...
+```
+
+然后 runner 中使用：
+
+```python
+dataset_name="my_dataset"
+```
+
+注意：当前注册表定义在 `ipix_dataset.py` 中，后续如果数据集变多，建议迁移到独立的 `src/datasets/registry.py`。
+
+## Loader 模式
+
+`DataConfig.loader_mode` 控制数据集如何创建。
+
+### train_val_test
+
+显式给出 train / val / test 路径：
+
+```python
+data = DataConfig(
+    dataset_name="ipix_tfg_all",
+    loader_mode="train_val_test",
+    train_path="train.npz",
+    val_path="val.npz",
+    test_path="test.npz",
+    extra={
+        "tc_ratio": 1 / 3,
+        "seed": 42,
+    },
+)
+```
+
+`data_factory.py` 会分别创建 train、val、test dataset。缺少某个路径时，该角色为 `None`。
+
+### auto_split_train_val_test
+
+通用自动划分模式。流程是：
+
+1. 根据 `train_path` 创建一个完整 dataset。
+2. 使用 PyTorch `random_split` 按比例切分。
+3. 返回 train / val / test 三个子集。
+
+示例：
+
+```python
+data = DataConfig(
+    dataset_name="ipix_tfg_all",
+    loader_mode="auto_split_train_val_test",
+    train_path=["all_data_1.npz", "all_data_2.npz"],
+    extra={
+        "tc_ratio": 1 / 3,
+        "seed": 42,
+        "train_val_test_split_ratios": (8, 1, 1),
+    },
+)
+```
+
+这个模式是通用逻辑，不使用 IPIX 实验里的特殊 `create_splits()`。
+
+### ipix_tfg_auto_split_train_val_test
+
+这是当前 IPIX TFG 实验使用的特殊划分模式，会调用：
+
+```python
+ipix_tfg_auto_split_dataset.create_splits(...)
+```
+
+适用于当前实验中需要：
+
+- 按标签分层划分 target / clutter。
+- 对每个 split 使用同一个 `tc_ratio`。
+- 可选保留 train 重采样后剩余的 clutter 数据，用于虚警阈值估计。
+
+示例见 [src/runner/ours_train.py](src/runner/ours_train.py)：
+
+```python
+data = DataConfig(
+    dataset_name="ipix_tfg_all",
+    loader_mode="ipix_tfg_auto_split_train_val_test",
+    train_path=[
+        "../dataset/ipix_tfg_random_hh_s128_complex/train/train_xxx_tfg.npz",
+    ],
+    extra={
+        "tc_ratio": 1 / 3,
+        "train_val_test_split_ratios": (8, 0, 2),
+        "get_rest_clutter_dataset": True,
+    },
+)
+```
+
+
+
+## 输出目录
+
+默认输出目录由 `RunConfig` 自动生成：
+
+```text
+./results/{experiment_name}
+```
+
+其中 checkpoint 默认路径为：
+
+```text
+./results/{experiment_name}/checkpoints/best_ckpt.pth
+```
+
+也可以在 `RunConfig` 中显式指定：
+
+```python
+RunConfig(
+    experiment_name="exp",
+    save_dir="./results/custom_exp",
+    load_model_path="./results/custom_exp/checkpoints/best_ckpt.pth",
+)
+```
+
+## 开发约定
+
+- runner 不写训练逻辑，只写配置。
+- main 不创建具体组件，只负责加载配置和分发。
+- Trainer 负责组织训练/测试流程，但不直接关心 dataset 如何构造。
+- factory 负责组件创建。
+- dataset 自己解析自己的 `**kwargs`。
+- 数据集主入口统一为 `file_paths, **kwargs`。
+
+## 当前注意事项
+
+- 一些旧 runner 仍可能使用旧的扁平配置或 `train_tc_ratio / val_tc_ratio / test_tc_ratio` 字段，需要逐步迁移到分层配置和统一 `tc_ratio`。
+- 当前数据集注册表还在 `ipix_dataset.py` 中，后续数据集类型变多后建议拆到 `src/datasets/registry.py`。
+- 本仓库当前没有随附数据文件，训练和测试需要本地数据路径正确配置后才能运行。
